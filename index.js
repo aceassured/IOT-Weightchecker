@@ -1,13 +1,12 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
+const { Pool } = require('pg');
 const cors = require('cors');
 
 const app = express();
 const PORT = 1848;
 
-
+// CORS setup
 app.use(cors({
   origin: 'http://localhost:5173',
   methods: ['GET', 'POST'],
@@ -16,33 +15,47 @@ app.use(cors({
 
 app.use(bodyParser.json());
 
+// PostgreSQL DB connection
+const pool = new Pool({
+  user: 'default',
+  host: 'ep-odd-water-a4hfiyxz-pooler.us-east-1.aws.neon.tech',
+  database: 'verceldb',
+  password: 'jle3AwCJPF2a',
+  port: 5432,
+  ssl: {
+    rejectUnauthorized: false, // Allow insecure SSL (self-signed certificates)
+  },
+});
 
-const dbPath = path.join(__dirname, 'barcode_data.db');
-const db = new sqlite3.Database(dbPath, (err) => {
+pool.connect((err) => {
   if (err) {
-    console.error('Failed to connect to database:', err.message);
+    console.error('Failed to connect to PostgreSQL database:', err.message);
   } else {
-    console.log('Connected to SQLite database.');
+    console.log('Connected to PostgreSQL database.');
   }
 });
 
+// Create table if not exists
+// const createTableQuery = `
+//   CREATE TABLE IF NOT EXISTS scanned_data (
+//     id SERIAL PRIMARY KEY,
+//     product TEXT,
+//     weight REAL,
+//     batch_id TEXT,
+//     result TEXT,
+//     product_id TEXT,
+//     time_scanned TEXT
+//   )
+// `;
 
-db.run(`
-  CREATE TABLE IF NOT EXISTS scanned_data (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    product TEXT,
-    weight REAL,
-    batch_id TEXT,
-    result TEXT,
-    product_id TEXT,
-    time_scanned TEXT
-  )
-`);
+// pool.query(createTableQuery)
+//   .then(() => console.log('Table is ready.'))
+//   .catch(err => console.error('Error creating table:', err));
 
 let latestWeight = null;
 
-
-app.post('/receive-qr', (req, res) => {
+// Receive QR Data
+app.post('/receive-qr', async (req, res) => {
   const rawData = req.body.qr_data;
 
   const validWeights = [50, 100, 200, 250, 500]; // Example valid weights
@@ -61,25 +74,20 @@ app.post('/receive-qr', (req, res) => {
 
     const insertQuery = `
       INSERT INTO scanned_data (product, weight, batch_id, result, product_id, time_scanned)
-      VALUES (?, ?, ?, ?, ?, ?)
+      VALUES ($1, $2, $3, $4, $5, $6)
     `;
-    db.run(insertQuery, [productName, weightValue, batchId, result, productId, timeScanned], (err) => {
-      if (err) {
-        console.error('Failed to insert into DB:', err.message);
-        return res.status(500).json({ status: 'error', message: 'Database insert failed' });
-      }
+    await pool.query(insertQuery, [productName, weightValue, batchId, result, productId, timeScanned]);
 
-      res.json({
-        status: 'success',
-        product_id: productId,
-        weight: weightValue,
-        batch_id: batchId,
-        time_scanned: timeScanned,
-        result: result,
-      });
+    res.json({
+      status: 'success',
+      product_id: productId,
+      weight: weightValue,
+      batch_id: batchId,
+      time_scanned: timeScanned,
+      result: result,
     });
   } catch (err) {
-    console.error('Failed to parse QR:', err.message);
+    console.error('Failed to process QR data:', err.message);
     res.status(400).json({
       status: 'error',
       message: 'Invalid JSON format in QR data',
@@ -87,21 +95,20 @@ app.post('/receive-qr', (req, res) => {
   }
 });
 
-
+// Latest weight endpoint
 app.get('/latest-weight', (req, res) => {
   res.json({ weight: latestWeight });
 });
 
-
-app.get('/scanned-data', (req, res) => {
-  const query = 'SELECT * FROM scanned_data ORDER BY id DESC';
-  db.all(query, [], (err, rows) => {
-    if (err) {
-      console.error('Failed to fetch data:', err.message);
-      return res.status(500).json({ status: 'error', message: 'Database fetch failed' });
-    }
-    res.json({ status: 'success', data: rows });
-  });
+// Get all scanned data
+app.get('/scanned-data', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM scanned_data ORDER BY id DESC');
+    res.json({ status: 'success', data: result.rows });
+  } catch (err) {
+    console.error('Failed to fetch data:', err.message);
+    res.status(500).json({ status: 'error', message: 'Database fetch failed' });
+  }
 });
 
 app.listen(PORT, () => {
